@@ -1,0 +1,33 @@
+# Ambiente virtual
+venv/
+.env/
+.python-version
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Streamlit
+.streamlit/
+
+# Arquivos gerados pelo app
+mapa.html
+uploaded_planilha.*
+cidades_cache.csv
+
+# Dados locais (NÃO subir)
+planilha.xlsx
+*.xls
+*.xlsx
+*.xlsm
+users.json
+
+# Editor/OS
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
