@@ -11,6 +11,8 @@ __pycache__/
 
 # Streamlit
 .streamlit/
+.streamlit/cache/
+
 
 # Arquivos gerados pelo app
 mapa.html
@@ -31,3 +33,10 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Temporários
+*~
+*.swp
+*.tmp
+
+
