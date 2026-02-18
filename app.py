@@ -4,8 +4,8 @@ import folium
 from folium.plugins import HeatMap
 from pathlib import Path
 import streamlit.components.v1 as components
+import unicodedata
 
-from auth import require_login, logout_button
 from data_loader import read_spreadsheet
 from geo import (
     explode_cidades,
@@ -97,36 +97,57 @@ def _format_tempo_contrato(dt_value) -> str:
         return ""
 
 
+def _norm_text_basic(s: str) -> str:
+    """Normaliza texto (remove acentos, lowercase, trim, espaços)."""
+    if s is None:
+        return ""
+    s = str(s)
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.lower().strip()
+    s = " ".join(s.split())
+    return s
+
+
+def _norm_uf(uf: str) -> str:
+    uf = _norm_text_basic(uf).upper()
+    return uf[:2] if uf else ""
+
+
 # -----------------------------
 # App
 # -----------------------------
 st.set_page_config(page_title="Mapa de calor - Provedores", layout="wide")
-require_login()
 
-# Logo na sidebar (sem use_container_width pra não quebrar)
+# Sidebar header
 if LOGO_PATH.exists():
     st.sidebar.image(str(LOGO_PATH), width=180)
 
 st.sidebar.title("Mapa de calor")
-st.sidebar.caption(f'Logado como: {st.session_state.auth.get("user")}')
-logout_button()
 
 st.title("Mapa de calor de clientes/provedores")
 
-# Upload opcional
+# Upload (Cloud-friendly)
 up = st.file_uploader(
-    "Envie a planilha (.xls/.xlsx) ou deixe em branco para usar o arquivo padrão",
+    "Envie a planilha (.xls/.xlsx) (no Streamlit Cloud isso é obrigatório)",
     type=["xls", "xlsx", "xlsm"],
 )
 
+# decide fonte da planilha
+planilha_path = None
 if up is not None:
     is_xlsx = up.name.lower().endswith(("xlsx", "xlsm"))
     tmp_path = Path("uploaded_planilha.xlsx" if is_xlsx else "uploaded_planilha.xls")
     tmp_path.write_bytes(up.getbuffer())
     planilha_path = str(tmp_path)
 else:
-    planilha_path = config.DEFAULT_SPREADSHEET_PATH
+    # tenta usar padrão local (funciona localmente, mas no Cloud geralmente não existe)
+    if getattr(config, "DEFAULT_SPREADSHEET_PATH", None) and Path(config.DEFAULT_SPREADSHEET_PATH).exists():
+        planilha_path = config.DEFAULT_SPREADSHEET_PATH
 
+if not planilha_path:
+    st.info("Envie uma planilha para começar (no Cloud não existe arquivo padrão local).")
+    st.stop()
 
 # Ler planilha
 try:
@@ -138,83 +159,66 @@ except Exception as e:
 # Normaliza nomes das colunas (resolve VALOR\nMENSAL etc.)
 df.columns = [_norm_col(c) for c in df.columns]
 
-# Garante coluna datetime para filtro (depois da normalização)
+# Coluna datetime para filtro (ASSINATURA CONTRATO)
 if col_exists(df, "ASSINATURA CONTRATO"):
-    df["ASSINATURA_DT"] = pd.to_datetime(
-        df["ASSINATURA CONTRATO"],
-        errors="coerce",
-        dayfirst=True,
-    )
+    df["ASSINATURA_DT"] = pd.to_datetime(df["ASSINATURA CONTRATO"], errors="coerce", dayfirst=True)
 else:
     df["ASSINATURA_DT"] = pd.NaT
 
 st.caption(f"Planilha carregada: `{planilha_path}` | Linhas: {len(df)}")
 
-
 # -----------------------------
 # Filtros (cliente)
 # -----------------------------
-df_f = df.copy()
-
 st.sidebar.subheader("Filtros (cliente)")
 
-# -----------------------------
-# Filtro por Nome do Cliente
-# -----------------------------
-if col_exists(df_f, "NOME FANTASIA"):
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Buscar Cliente")
+df_f = df.copy()
 
-    busca_nome = st.sidebar.text_input(
-        "Nome do cliente",
-        placeholder="Digite parte do nome...",
-    )
-
-    if busca_nome:
-        df_f = df_f[
-            df_f["NOME FANTASIA"]
-            .astype(str)
-            .str.contains(busca_nome, case=False, na=False)
-        ]
-
-# -----------------------------
-# Filtro por Data de Ativação (slider) - com proteção p/ RangeError
-# -----------------------------
+# Filtro por nome do cliente (contém)
 st.sidebar.markdown("---")
-st.sidebar.subheader("Período de Ativação")
+st.sidebar.subheader("Buscar Cliente")
+busca_nome = st.sidebar.text_input("Nome do cliente", placeholder="Digite parte do nome...")
 
-datas = df_f["ASSINATURA_DT"].dropna()
+if busca_nome and col_exists(df_f, "NOME FANTASIA"):
+    df_f = df_f[
+        df_f["NOME FANTASIA"]
+        .astype(str)
+        .str.contains(busca_nome, case=False, na=False)
+    ]
 
-if datas.empty:
-    st.sidebar.caption("Sem datas válidas na coluna ASSINATURA CONTRATO.")
-    data_ini, data_fim = None, None
-else:
-    data_min = datas.min().date()
-    data_max = datas.max().date()
+# Filtro por período (slider) - sem RangeError quando min==max
+st.sidebar.markdown("---")
+st.sidebar.subheader("Período de Ativação (Assinatura)")
 
-    # ✅ quando só existe 1 data (min == max), slider dá RangeError
-    if data_min >= data_max:
-        st.sidebar.caption(f"Data única no filtro: {data_min.strftime('%d/%m/%Y')}")
-        data_ini, data_fim = data_min, data_max
+datas_validas = df_f["ASSINATURA_DT"].dropna() if col_exists(df_f, "ASSINATURA_DT") else pd.Series([], dtype="datetime64[ns]")
+
+data_inicio, data_fim = None, None
+if not datas_validas.empty:
+    dmin = datas_validas.min().date()
+    dmax = datas_validas.max().date()
+
+    if dmin == dmax:
+        st.sidebar.caption(f"Apenas 1 data no filtro atual: **{dmin.strftime('%d/%m/%Y')}**")
+        data_inicio, data_fim = dmin, dmax
     else:
-        data_ini, data_fim = st.sidebar.slider(
+        data_inicio, data_fim = st.sidebar.slider(
             "Selecione o período",
-            min_value=data_min,
-            max_value=data_max,
-            value=(data_min, data_max),
+            min_value=dmin,
+            max_value=dmax,
+            value=(dmin, dmax),
             format="DD/MM/YYYY",
         )
 
-    # aplica filtro sempre que tiver datas
+    # aplica filtro
     df_f = df_f[df_f["ASSINATURA_DT"].notna()].copy()
     df_f = df_f[
-        (df_f["ASSINATURA_DT"].dt.date >= data_ini)
-        & (df_f["ASSINATURA_DT"].dt.date <= data_fim)
+        (df_f["ASSINATURA_DT"].dt.date >= data_inicio) &
+        (df_f["ASSINATURA_DT"].dt.date <= data_fim)
     ]
+else:
+    st.sidebar.caption("Sem datas válidas para filtrar (ASSINATURA CONTRATO).")
 
-# -----------------------------
-# Outros filtros (cliente)
-# -----------------------------
+# Outros filtros
 if col_exists(df_f, config.COL_VENDEDOR):
     vend_opts = sorted(df_f[config.COL_VENDEDOR].dropna().unique())
     vendedor = st.sidebar.multiselect("VENDEDOR", vend_opts)
@@ -229,31 +233,46 @@ if col_exists(df_f, config.COL_UF_CLIENTE):
 
 
 # -----------------------------
-# Opção: bolinha por cidade base ou cidades atendidas
+# Como mostrar as bolinhas
 # -----------------------------
 st.sidebar.markdown("---")
-st.sidebar.subheader("Tipo de ponto (bolinhas)")
+st.sidebar.subheader("Bolinhas (pontos clicáveis)")
 
-op_ponto = st.sidebar.radio(
+modo_bolinhas = st.sidebar.radio(
     "Mostrar bolinhas por:",
-    options=[
-        "Cidades atendidas",
-        "Cidade base (cadastro)",
-    ],
+    ["Cidades atendidas", "Cidade base do cliente", "Ambos"],
     index=0,
 )
 
+MOSTRAR_PONTOS = st.sidebar.checkbox("Mostrar pontos clicáveis", True)
+SEMPRE_TODAS = st.sidebar.checkbox("Sempre mostrar todas", True)
+
 # -----------------------------
-# Explode cidades (somente se for por cidades atendidas)
+# Coordenadas (cache)
 # -----------------------------
-if op_ponto == "Cidades atendidas":
+if Path(config.CIDADES_CSV).exists():
+    coords_df = load_city_coords_csv(config.CIDADES_CSV)
+else:
+    coords_df = load_cache(config.CIDADES_CACHE_CSV)
+
+# Geocoding opcional
+st.sidebar.markdown("---")
+st.sidebar.subheader("Geocoding (opcional)")
+allow_geocode = st.sidebar.checkbox("Geocodificar cidades faltantes (precisa internet)", value=False)
+
+# -----------------------------
+# Montar dataset de mapa (heatmap + bolinhas)
+# -----------------------------
+# A) Cidades atendidas (explode)
+df_att = None
+if modo_bolinhas in ("Cidades atendidas", "Ambos"):
     if not col_exists(df_f, config.COL_CIDADES_ATENDIDAS):
         st.error(f"Coluna `{config.COL_CIDADES_ATENDIDAS}` não encontrada.")
         st.stop()
 
     df_exp = explode_cidades(df_f, col=config.COL_CIDADES_ATENDIDAS)
 
-    # Filtros (atendimento)
+    # filtros (atendimento)
     st.sidebar.markdown("---")
     st.sidebar.subheader("Filtros (atendimento)")
 
@@ -269,126 +288,132 @@ if op_ponto == "Cidades atendidas":
     if cidade_atendida:
         df_exp_f = df_exp_f[df_exp_f["CIDADE_ATENDIDA"].isin(cidade_atendida)]
 
-    df_para_geo = df_exp_f.copy()
+    # geocode opcional (atendidas)
+    if allow_geocode:
+        unique = df_exp_f[["cidade_norm", "uf_norm", "CIDADE_ATENDIDA", "UF_ATENDIDA"]].drop_duplicates()
+        coords_df = geocode_missing(unique, coords_df)
+        save_cache(config.CIDADES_CACHE_CSV, coords_df)
+        st.sidebar.success("Cache atualizado")
 
-else:
-    # Cidade base: cria colunas no mesmo formato que explode_cidades entrega
-    # (CIDADE_ATENDIDA, UF_ATENDIDA, cidade_norm, uf_norm)
-    if not (col_exists(df_f, "CIDADE") and col_exists(df_f, "UF")):
-        st.error("Para usar 'Cidade base (cadastro)', preciso das colunas `CIDADE` e `UF` na planilha.")
-        st.stop()
+    df_att = df_exp_f.merge(coords_df, on=["cidade_norm", "uf_norm"], how="left")
+    if "PESO" not in df_att.columns:
+        df_att["PESO"] = 1
 
-    df_para_geo = df_f.copy()
-    df_para_geo["CIDADE_ATENDIDA"] = df_para_geo["CIDADE"]
-    df_para_geo["UF_ATENDIDA"] = df_para_geo["UF"]
+# B) Cidade base do cliente (CIDADE/UF do cadastro)
+df_base = None
+if modo_bolinhas in ("Cidade base do cliente", "Ambos"):
+    df_base = df_f.copy()
 
-    # normalizações compatíveis com geo.py (mesmo padrão do explode)
-    df_para_geo["cidade_norm"] = df_para_geo["CIDADE_ATENDIDA"].astype(str).str.strip().str.lower()
-    df_para_geo["uf_norm"] = df_para_geo["UF_ATENDIDA"].astype(str).str.strip().str.upper()
+    # tenta pegar colunas padrão
+    col_uf = config.COL_UF_CLIENTE if col_exists(df_base, config.COL_UF_CLIENTE) else "UF"
+    col_cidade = "CIDADE" if col_exists(df_base, "CIDADE") else None
 
-    st.sidebar.markdown("---")
-    st.sidebar.caption("Filtro por UF/Cidade atendida não se aplica ao modo 'Cidade base'.")
+    if not col_cidade or not col_exists(df_base, col_uf):
+        st.warning("Não encontrei colunas de cidade/UF do cliente (CIDADE e UF). Vou ignorar 'Cidade base'.")
+        df_base = None
+    else:
+        df_base["uf_norm"] = df_base[col_uf].apply(_norm_uf)
+        df_base["cidade_norm"] = df_base[col_cidade].apply(_norm_text_basic)
 
+        # geocode opcional (base)
+        if allow_geocode:
+            unique = df_base[["cidade_norm", "uf_norm"]].drop_duplicates().copy()
+            unique["CIDADE_ATENDIDA"] = unique["cidade_norm"]
+            unique["UF_ATENDIDA"] = unique["uf_norm"]
+            coords_df = geocode_missing(unique, coords_df)
+            save_cache(config.CIDADES_CACHE_CSV, coords_df)
+            st.sidebar.success("Cache atualizado")
 
-# -----------------------------
-# Coordenadas
-# -----------------------------
-if Path(config.CIDADES_CSV).exists():
-    coords_df = load_city_coords_csv(config.CIDADES_CSV)
-else:
-    coords_df = load_cache(config.CIDADES_CACHE_CSV)
+        df_base = df_base.merge(coords_df, on=["cidade_norm", "uf_norm"], how="left")
+        df_base["PESO"] = 1
 
-# Geocoding opcional
-st.sidebar.markdown("---")
-st.sidebar.subheader("Geocoding (opcional)")
+# Combina para mapa/heat
+dfs = [d for d in [df_att, df_base] if d is not None]
+if not dfs:
+    st.info("Nenhum dado para exibir com os filtros atuais.")
+    st.stop()
 
-allow_geocode = st.sidebar.checkbox(
-    "Geocodificar cidades faltantes (precisa internet)",
-    value=False,
-)
-
-if allow_geocode:
-    unique = (
-        df_para_geo[["cidade_norm", "uf_norm", "CIDADE_ATENDIDA", "UF_ATENDIDA"]]
-        .drop_duplicates()
-    )
-    coords_df = geocode_missing(unique, coords_df)
-    save_cache(config.CIDADES_CACHE_CSV, coords_df)
-    st.sidebar.success("Cache atualizado")
-
-# Merge coordenadas
-df_geo = df_para_geo.merge(coords_df, on=["cidade_norm", "uf_norm"], how="left")
+df_geo = pd.concat(dfs, ignore_index=True)
 
 faltando = int(df_geo["lat"].isna().sum())
 st.write(f"Registros: **{len(df_geo)}** | Sem coordenada: **{faltando}**")
 
 if faltando > 0:
     st.subheader("Cidades sem coordenada")
-    sem_coord = (
-        df_geo[df_geo["lat"].isna()][["CIDADE_ATENDIDA", "UF_ATENDIDA"]]
-        .drop_duplicates()
-    )
-    st.dataframe(sem_coord, use_container_width=True)
+    sem_coord_cols = []
+    if "CIDADE_ATENDIDA" in df_geo.columns and "UF_ATENDIDA" in df_geo.columns:
+        sem_coord_cols = ["CIDADE_ATENDIDA", "UF_ATENDIDA"]
+    elif "CIDADE" in df_geo.columns and "UF" in df_geo.columns:
+        sem_coord_cols = ["CIDADE", "UF"]
 
+    if sem_coord_cols:
+        sem_coord = df_geo[df_geo["lat"].isna()][sem_coord_cols].drop_duplicates()
+        st.dataframe(sem_coord, use_container_width=True)
 
 # -----------------------------
-# Ranking / Gráficos
+# Ranking / Gráficos (mantém por atendidas se existir, senão base)
 # -----------------------------
 st.markdown("### Rankings e gráficos")
 
-rank_base = df_geo.dropna(subset=["CIDADE_ATENDIDA", "UF_ATENDIDA"]).copy()
+rank_source = df_att if df_att is not None else df_base
+rank_base = rank_source.dropna(subset=["lat", "lon"]).copy()
 
-# Top 10
-#st.markdown("#### Top 10 cidades (quantidade)")
-#top10_cidades = (
-#    rank_base.groupby(["UF_ATENDIDA", "CIDADE_ATENDIDA"], as_index=False)
-#    .size()
-#    .sort_values("size", ascending=False)
-#    .head(10)
-#    .rename(columns={"size": "QTDE"})
-#)
-#st.dataframe(
-#    top10_cidades[["UF_ATENDIDA", "CIDADE_ATENDIDA", "QTDE"]],
-#    use_container_width=True,
-#)
+# se tiver UF_ATENDIDA usa isso, senão usa UF do cadastro
+uf_rank_col = "UF_ATENDIDA" if "UF_ATENDIDA" in rank_base.columns else ("UF" if "UF" in rank_base.columns else None)
 
-# Por UF
+# Top 10 cidades (se atendida, usa CIDADE_ATENDIDA; senão CIDADE)
+st.markdown("#### Top 10 cidades (por quantidade)")
+cidade_rank_col = "CIDADE_ATENDIDA" if "CIDADE_ATENDIDA" in rank_base.columns else ("CIDADE" if "CIDADE" in rank_base.columns else None)
+
+if uf_rank_col and cidade_rank_col:
+    top10_cidades = (
+        rank_base.groupby([uf_rank_col, cidade_rank_col], as_index=False)
+        .size()
+        .sort_values("size", ascending=False)
+        .head(10)
+        .rename(columns={"size": "QTDE", uf_rank_col: "UF", cidade_rank_col: "CIDADE"})
+    )
+    st.dataframe(top10_cidades[["UF", "CIDADE", "QTDE"]], use_container_width=True)
+else:
+    st.caption("Sem colunas suficientes para Top 10 cidades.")
+
+# Gráfico por UF
 st.markdown("#### Atendimentos por UF (quantidade)")
-por_uf = (
-    rank_base.groupby("UF_ATENDIDA", as_index=False)
-    .size()
-    .sort_values("size", ascending=False)
-    .rename(columns={"size": "QTDE"})
-)
-st.bar_chart(por_uf.set_index("UF_ATENDIDA")["QTDE"])
+if uf_rank_col:
+    por_uf = (
+        rank_base.groupby(uf_rank_col, as_index=False)
+        .size()
+        .sort_values("size", ascending=False)
+        .rename(columns={"size": "QTDE", uf_rank_col: "UF"})
+    )
+    st.bar_chart(por_uf.set_index("UF")["QTDE"])
+else:
+    st.caption("Sem coluna UF para gráfico.")
 
-# Por Região
+# Gráfico por Região
 st.markdown("#### Atendimentos por Região (quantidade)")
 UF_PARA_REGIAO = {
-    # Norte
     "AC": "Norte", "AP": "Norte", "AM": "Norte", "PA": "Norte",
     "RO": "Norte", "RR": "Norte", "TO": "Norte",
-    # Nordeste
     "AL": "Nordeste", "BA": "Nordeste", "CE": "Nordeste", "MA": "Nordeste",
     "PB": "Nordeste", "PE": "Nordeste", "PI": "Nordeste", "RN": "Nordeste", "SE": "Nordeste",
-    # Centro-Oeste
     "DF": "Centro-Oeste", "GO": "Centro-Oeste", "MT": "Centro-Oeste", "MS": "Centro-Oeste",
-    # Sudeste
     "ES": "Sudeste", "MG": "Sudeste", "RJ": "Sudeste", "SP": "Sudeste",
-    # Sul
     "PR": "Sul", "RS": "Sul", "SC": "Sul",
 }
 
-rank_base["REGIAO"] = rank_base["UF_ATENDIDA"].astype(str).str.upper().map(UF_PARA_REGIAO).fillna("Desconhecida")
-
-por_regiao = (
-    rank_base.groupby("REGIAO", as_index=False)
-    .size()
-    .sort_values("size", ascending=False)
-    .rename(columns={"size": "QTDE"})
-)
-st.bar_chart(por_regiao.set_index("REGIAO")["QTDE"])
-
+if uf_rank_col:
+    tmp = rank_base.copy()
+    tmp["REGIAO"] = tmp[uf_rank_col].astype(str).str.upper().map(UF_PARA_REGIAO).fillna("Desconhecida")
+    por_regiao = (
+        tmp.groupby("REGIAO", as_index=False)
+        .size()
+        .sort_values("size", ascending=False)
+        .rename(columns={"size": "QTDE"})
+    )
+    st.bar_chart(por_regiao.set_index("REGIAO")["QTDE"])
+else:
+    st.caption("Sem coluna UF para região.")
 
 # -----------------------------
 # MAPA
@@ -396,14 +421,14 @@ st.bar_chart(por_regiao.set_index("REGIAO")["QTDE"])
 st.markdown("### Mapa")
 
 df_map = df_geo.dropna(subset=["lat", "lon"]).copy()
+
 zoom = st.sidebar.slider("Zoom inicial", 3, 12, 4)
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("Pontos")
-MOSTRAR_PONTOS = st.sidebar.checkbox("Mostrar pontos clicáveis", True)
-
-# sempre mostrar todas
-LIMITE_PONTOS = len(df_map)
+# limite opcional (performance)
+if not SEMPRE_TODAS:
+    LIMITE_PONTOS = st.sidebar.slider("Limite de bolinhas", 100, 5000, 800, 100)
+else:
+    LIMITE_PONTOS = len(df_map)
 
 m = folium.Map(
     location=[-14.2, -51.9],
@@ -411,17 +436,15 @@ m = folium.Map(
     tiles="OpenStreetMap",
     control_scale=True,
 )
+
 folium.TileLayer("CartoDB positron", show=False).add_to(m)
 
+# Panes
 folium.map.CustomPane("heatmap", z_index=200).add_to(m)
 folium.map.CustomPane("markers", z_index=650).add_to(m)
 
-# PESO pode não existir em alguns fluxos -> fallback para 1
-if "PESO" in df_map.columns:
-    pontos_heat = df_map[["lat", "lon", "PESO"]].values.tolist()
-else:
-    pontos_heat = df_map[["lat", "lon"]].assign(PESO=1)[["lat", "lon", "PESO"]].values.tolist()
-
+# Heatmap
+pontos_heat = df_map[["lat", "lon", "PESO"]].values.tolist()
 st.caption(f"Pontos no heatmap: {len(pontos_heat)}")
 
 if pontos_heat:
@@ -433,9 +456,11 @@ if pontos_heat:
         pane="heatmap",
     ).add_to(m)
 
+# Bolinhas com popup
 if MOSTRAR_PONTOS and not df_map.empty:
+
     df_tt = df_map.head(LIMITE_PONTOS).copy()
-    layer = folium.FeatureGroup("Pontos (por cidade)")
+    layer = folium.FeatureGroup("Pontos")
 
     grupos = df_tt.groupby(["lat", "lon"])
 
@@ -448,12 +473,10 @@ if MOSTRAR_PONTOS and not df_map.empty:
 
             valor = _format_money(row.get("VALOR MENSAL", ""))
             vendedor = _safe(row.get("VENDEDOR", ""))
-
             assinatura_raw = row.get("ASSINATURA CONTRATO", "")
             assinatura = _format_date(assinatura_raw)
             tempo_contrato = _format_tempo_contrato(assinatura_raw)
 
-            # cidades atendidas pode ter nomes com espaço/underscore
             cidades_atend = _safe(row.get("CIDADES ATENDIDAS", row.get("CIDADES_ATENDIDAS", "")))
 
             itens.append(
@@ -461,9 +484,9 @@ if MOSTRAR_PONTOS and not df_map.empty:
                 <div style="padding:6px 0;border-bottom:1px solid #eee;">
                   <b>{cliente}</b><br>
                   <span>UF/Cidade: {uf} / {cidade}</span><br>
-                  <span>Valor mensal: {valor}</span><br>
+                  <span><b>Valor mensal:</b> {valor}</span><br>
                   <span>Vendedor: {vendedor}</span><br>
-                  <span>Assinatura: {assinatura}</span><br>
+                  <span><b>Assinatura:</b> {assinatura}</span><br>
                   <span>Tempo de contrato: {tempo_contrato}</span><br>
                   <span>Cidades atendidas: {cidades_atend}</span>
                 </div>
@@ -492,11 +515,13 @@ if MOSTRAR_PONTOS and not df_map.empty:
 
     layer.add_to(m)
 
+# Enquadrar
 if not df_map.empty:
     m.fit_bounds(df_map[["lat", "lon"]].values.tolist())
 
 folium.LayerControl().add_to(m)
 
+# Render
 html_path = "mapa.html"
 m.save(html_path)
 
