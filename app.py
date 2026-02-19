@@ -4,6 +4,7 @@ import folium
 from folium.plugins import HeatMap
 from pathlib import Path
 import streamlit.components.v1 as components
+import unicodedata
 
 from auth import require_login, logout_button
 from data_loader import read_spreadsheet
@@ -43,7 +44,7 @@ def _format_money(v) -> str:
     if pd.isna(v) or v == "":
         return ""
     try:
-        val = float(str(v).replace(".", "").replace(",", "."))
+        val = float(v)
         return f"{val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except Exception:
         return str(v)
@@ -97,42 +98,30 @@ def _format_tempo_contrato(dt_value) -> str:
         return ""
 
 
-# -----------------------------
-# Cache (evita recarregar a planilha a cada rerun)
-# -----------------------------
-@st.cache_data(show_spinner=False)
-def _load_df_from_uploaded(uploaded_file) -> pd.DataFrame:
-    df = read_spreadsheet(uploaded_file)
-    df.columns = [_norm_col(c) for c in df.columns]
-    if col_exists(df, "ASSINATURA CONTRATO"):
-        df["ASSINATURA_DT"] = pd.to_datetime(
-            df["ASSINATURA CONTRATO"], errors="coerce", dayfirst=True
-        )
-    else:
-        df["ASSINATURA_DT"] = pd.NaT
-    return df
+def _norm_text_basic(s: str) -> str:
+    """Normaliza texto: remove acento, lowercase, trim, espaços."""
+    if s is None:
+        return ""
+    s = str(s)
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.lower().strip()
+    s = " ".join(s.split())
+    return s
 
 
-@st.cache_data(show_spinner=False)
-def _load_df_from_path(path: str) -> pd.DataFrame:
-    df = read_spreadsheet(path)
-    df.columns = [_norm_col(c) for c in df.columns]
-    if col_exists(df, "ASSINATURA CONTRATO"):
-        df["ASSINATURA_DT"] = pd.to_datetime(
-            df["ASSINATURA CONTRATO"], errors="coerce", dayfirst=True
-        )
-    else:
-        df["ASSINATURA_DT"] = pd.NaT
-    return df
+def _norm_uf(uf: str) -> str:
+    uf = _norm_text_basic(uf).upper()
+    return uf[:2] if uf else ""
 
 
 # -----------------------------
 # App
 # -----------------------------
 st.set_page_config(page_title="Mapa de calor - Provedores", layout="wide")
-#require_login()
+require_login()
 
-# Logo na sidebar
+# Logo na sidebar (sem use_container_width pra não quebrar)
 if LOGO_PATH.exists():
     st.sidebar.image(str(LOGO_PATH), width=180)
 
@@ -142,46 +131,58 @@ logout_button()
 
 st.title("Mapa de calor de clientes/provedores")
 
-# Upload (recomendado)
+# Upload opcional
 up = st.file_uploader(
-    "Envie a planilha (.xls/.xlsx) — recomendado para uso na nuvem",
+    "Envie a planilha (.xls/.xlsx) ou deixe em branco para usar o arquivo padrão",
     type=["xls", "xlsx", "xlsm"],
 )
 
-# ✅ NÃO salva no disco com nome fixo (evita conflito Cloud)
 if up is not None:
-    try:
-        df = _load_df_from_uploaded(up)
-        st.caption(f"Planilha carregada via upload: **{up.name}** | Linhas: {len(df)}")
-    except Exception as e:
-        st.error(f"Não consegui ler a planilha enviada: {e}")
-        st.stop()
+    is_xlsx = up.name.lower().endswith(("xlsx", "xlsm"))
+    tmp_path = Path("uploaded_planilha.xlsx" if is_xlsx else "uploaded_planilha.xls")
+    tmp_path.write_bytes(up.getbuffer())
+    planilha_path = str(tmp_path)
 else:
-    # fallback local (se existir)
     planilha_path = config.DEFAULT_SPREADSHEET_PATH
-    try:
-        df = _load_df_from_path(planilha_path)
-        st.caption(f"Planilha carregada: `{planilha_path}` | Linhas: {len(df)}")
-    except Exception as e:
-        st.warning("Envie uma planilha para continuar (modo nuvem).")
-        st.caption(f"Detalhe do erro ao tentar usar arquivo padrão: {e}")
-        st.stop()
 
+# Ler planilha
+try:
+    df = read_spreadsheet(planilha_path)
+except Exception as e:
+    st.error(f"Não consegui ler a planilha: {e}")
+    st.stop()
+
+# Normaliza nomes das colunas (resolve VALOR\nMENSAL etc.)
+df.columns = [_norm_col(c) for c in df.columns]
+
+# Garante coluna datetime para filtro (depois da normalização)
+if col_exists(df, "ASSINATURA CONTRATO"):
+    df["ASSINATURA_DT"] = pd.to_datetime(
+        df["ASSINATURA CONTRATO"],
+        errors="coerce",
+        dayfirst=True,
+    )
+else:
+    df["ASSINATURA_DT"] = pd.NaT
+
+st.caption(f"Planilha carregada: `{planilha_path}` | Linhas: {len(df)}")
 
 # -----------------------------
 # Filtros (cliente)
 # -----------------------------
 df_f = df.copy()
-
 st.sidebar.subheader("Filtros (cliente)")
 
-# Filtro por nome
+# Filtro por Nome
 if col_exists(df_f, "NOME FANTASIA"):
     st.sidebar.markdown("---")
     st.sidebar.subheader("Buscar Cliente")
+
     busca_nome = st.sidebar.text_input(
-        "Nome do cliente", placeholder="Digite parte do nome..."
+        "Nome do cliente",
+        placeholder="Digite parte do nome...",
     )
+
     if busca_nome:
         df_f = df_f[
             df_f["NOME FANTASIA"]
@@ -189,7 +190,7 @@ if col_exists(df_f, "NOME FANTASIA"):
             .str.contains(busca_nome, case=False, na=False)
         ]
 
-# Filtro por período (com proteção RangeError)
+# Filtro por Data (RangeError safe)
 st.sidebar.markdown("---")
 st.sidebar.subheader("Período de Ativação")
 
@@ -197,6 +198,7 @@ datas = df_f["ASSINATURA_DT"].dropna()
 
 if datas.empty:
     st.sidebar.caption("Sem datas válidas na coluna ASSINATURA CONTRATO.")
+    data_ini, data_fim = None, None
 else:
     data_min = datas.min().date()
     data_max = datas.max().date()
@@ -219,7 +221,7 @@ else:
         & (df_f["ASSINATURA_DT"].dt.date <= data_fim)
     ]
 
-# Outros filtros
+# Outros filtros (cliente)
 if col_exists(df_f, config.COL_VENDEDOR):
     vend_opts = sorted(df_f[config.COL_VENDEDOR].dropna().unique())
     vendedor = st.sidebar.multiselect("VENDEDOR", vend_opts)
@@ -232,23 +234,29 @@ if col_exists(df_f, config.COL_UF_CLIENTE):
     if uf_cli:
         df_f = df_f[df_f[config.COL_UF_CLIENTE].isin(uf_cli)]
 
-
 # -----------------------------
-# Opção: bolinha por cidade base ou cidades atendidas
+# Opção: bolinhas por base/atendidas/ambos
 # -----------------------------
 st.sidebar.markdown("---")
 st.sidebar.subheader("Tipo de ponto (bolinhas)")
 
 op_ponto = st.sidebar.radio(
     "Mostrar bolinhas por:",
-    options=["Cidades atendidas", "Cidade base (cadastro)"],
+    options=[
+        "Cidades atendidas",
+        "Cidade base (cadastro)",
+        "Ambos",
+    ],
     index=0,
 )
 
 # -----------------------------
-# Explode / Preparação para Geo
+# Preparar dados para geocoding/mapa
 # -----------------------------
-if op_ponto == "Cidades atendidas":
+dfs_para_geo = []
+
+# A) Atendidas
+if op_ponto in ("Cidades atendidas", "Ambos"):
     if not col_exists(df_f, config.COL_CIDADES_ATENDIDAS):
         st.error(f"Coluna `{config.COL_CIDADES_ATENDIDAS}` não encontrada.")
         st.stop()
@@ -271,22 +279,29 @@ if op_ponto == "Cidades atendidas":
     if cidade_atendida:
         df_exp_f = df_exp_f[df_exp_f["CIDADE_ATENDIDA"].isin(cidade_atendida)]
 
-    df_para_geo = df_exp_f.copy()
+    dfs_para_geo.append(df_exp_f)
 
-else:
+# B) Base
+if op_ponto in ("Cidade base (cadastro)", "Ambos"):
     if not (col_exists(df_f, "CIDADE") and col_exists(df_f, "UF")):
-        st.error("Para usar 'Cidade base (cadastro)', preciso das colunas `CIDADE` e `UF`.")
+        st.error("Para usar 'Cidade base (cadastro)', preciso das colunas `CIDADE` e `UF` na planilha.")
         st.stop()
 
-    df_para_geo = df_f.copy()
-    df_para_geo["CIDADE_ATENDIDA"] = df_para_geo["CIDADE"]
-    df_para_geo["UF_ATENDIDA"] = df_para_geo["UF"]
-    df_para_geo["cidade_norm"] = df_para_geo["CIDADE_ATENDIDA"].astype(str).str.strip().str.lower()
-    df_para_geo["uf_norm"] = df_para_geo["UF_ATENDIDA"].astype(str).str.strip().str.upper()
+    df_base = df_f.copy()
+    df_base["CIDADE_ATENDIDA"] = df_base["CIDADE"]
+    df_base["UF_ATENDIDA"] = df_base["UF"]
 
-    st.sidebar.markdown("---")
-    st.sidebar.caption("Filtro por UF/Cidade atendida não se aplica ao modo 'Cidade base'.")
+    # normaliza para bater com o cache/coords
+    df_base["cidade_norm"] = df_base["CIDADE_ATENDIDA"].apply(_norm_text_basic)
+    df_base["uf_norm"] = df_base["UF_ATENDIDA"].apply(_norm_uf)
 
+    dfs_para_geo.append(df_base)
+
+df_para_geo = pd.concat(dfs_para_geo, ignore_index=True)
+
+# garante PESO
+if "PESO" not in df_para_geo.columns:
+    df_para_geo["PESO"] = 1
 
 # -----------------------------
 # Coordenadas
@@ -300,7 +315,10 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.subheader("Geocoding (opcional)")
 
-allow_geocode = st.sidebar.checkbox("Geocodificar cidades faltantes (precisa internet)", value=False)
+allow_geocode = st.sidebar.checkbox(
+    "Geocodificar cidades faltantes (precisa internet)",
+    value=False,
+)
 
 if allow_geocode:
     unique = (
@@ -311,6 +329,7 @@ if allow_geocode:
     save_cache(config.CIDADES_CACHE_CSV, coords_df)
     st.sidebar.success("Cache atualizado")
 
+# Merge coordenadas
 df_geo = df_para_geo.merge(coords_df, on=["cidade_norm", "uf_norm"], how="left")
 
 faltando = int(df_geo["lat"].isna().sum())
@@ -324,7 +343,6 @@ if faltando > 0:
     )
     st.dataframe(sem_coord, use_container_width=True)
 
-
 # -----------------------------
 # Ranking / Gráficos
 # -----------------------------
@@ -332,7 +350,6 @@ st.markdown("### Rankings e gráficos")
 
 rank_base = df_geo.dropna(subset=["CIDADE_ATENDIDA", "UF_ATENDIDA"]).copy()
 
-# Por UF
 st.markdown("#### Atendimentos por UF (quantidade)")
 por_uf = (
     rank_base.groupby("UF_ATENDIDA", as_index=False)
@@ -342,7 +359,6 @@ por_uf = (
 )
 st.bar_chart(por_uf.set_index("UF_ATENDIDA")["QTDE"])
 
-# Por Região
 st.markdown("#### Atendimentos por Região (quantidade)")
 UF_PARA_REGIAO = {
     "AC": "Norte", "AP": "Norte", "AM": "Norte", "PA": "Norte",
@@ -353,10 +369,7 @@ UF_PARA_REGIAO = {
     "ES": "Sudeste", "MG": "Sudeste", "RJ": "Sudeste", "SP": "Sudeste",
     "PR": "Sul", "RS": "Sul", "SC": "Sul",
 }
-
-rank_base["REGIAO"] = (
-    rank_base["UF_ATENDIDA"].astype(str).str.upper().map(UF_PARA_REGIAO).fillna("Desconhecida")
-)
+rank_base["REGIAO"] = rank_base["UF_ATENDIDA"].astype(str).str.upper().map(UF_PARA_REGIAO).fillna("Desconhecida")
 
 por_regiao = (
     rank_base.groupby("REGIAO", as_index=False)
@@ -366,23 +379,20 @@ por_regiao = (
 )
 st.bar_chart(por_regiao.set_index("REGIAO")["QTDE"])
 
-
 # -----------------------------
 # MAPA
 # -----------------------------
 st.markdown("### Mapa")
 
 df_map = df_geo.dropna(subset=["lat", "lon"]).copy()
-
 zoom = st.sidebar.slider("Zoom inicial", 3, 12, 4)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Pontos")
-
 MOSTRAR_PONTOS = st.sidebar.checkbox("Mostrar pontos clicáveis", True)
 
-# ✅ proteção para não travar no Cloud (você pode ajustar)
-MAX_MARKERS = st.sidebar.slider("Limite de bolinhas", 200, 5000, 1500, 100)
+# sempre mostrar todas
+LIMITE_PONTOS = len(df_map)
 
 m = folium.Map(
     location=[-14.2, -51.9],
@@ -390,22 +400,12 @@ m = folium.Map(
     tiles="OpenStreetMap",
     control_scale=True,
 )
-
 folium.TileLayer("CartoDB positron", show=False).add_to(m)
 
 folium.map.CustomPane("heatmap", z_index=200).add_to(m)
 folium.map.CustomPane("markers", z_index=650).add_to(m)
 
-# Heatmap (amostragem de segurança)
-MAX_HEAT = 10000
-df_heat = df_map
-if len(df_heat) > MAX_HEAT:
-    df_heat = df_heat.sample(MAX_HEAT, random_state=42)
-
-if "PESO" in df_heat.columns:
-    pontos_heat = df_heat[["lat", "lon", "PESO"]].values.tolist()
-else:
-    pontos_heat = df_heat[["lat", "lon"]].assign(PESO=1)[["lat", "lon", "PESO"]].values.tolist()
+pontos_heat = df_map[["lat", "lon", "PESO"]].values.tolist()
 
 st.caption(f"Pontos no heatmap: {len(pontos_heat)}")
 
@@ -418,12 +418,12 @@ if pontos_heat:
         pane="heatmap",
     ).add_to(m)
 
-# Marcadores
 if MOSTRAR_PONTOS and not df_map.empty:
-    df_tt = df_map.head(MAX_MARKERS).copy()
+    df_tt = df_map.head(LIMITE_PONTOS).copy()
     layer = folium.FeatureGroup("Pontos (por cidade)")
 
     grupos = df_tt.groupby(["lat", "lon"])
+
     for (lat, lon), g in grupos:
         itens = []
         for _, row in g.iterrows():
@@ -481,7 +481,6 @@ if not df_map.empty:
 
 folium.LayerControl().add_to(m)
 
-# Render
 html_path = "mapa.html"
 m.save(html_path)
 
