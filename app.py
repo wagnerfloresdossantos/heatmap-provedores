@@ -130,7 +130,7 @@ def _load_df_from_path(path: str) -> pd.DataFrame:
 # App
 # -----------------------------
 st.set_page_config(page_title="Mapa de calor - Provedores", layout="wide")
-require_login()
+#require_login()
 
 # Logo na sidebar
 if LOGO_PATH.exists():
