@@ -241,7 +241,7 @@ modo_bolinhas = st.sidebar.radio(
 )
 
 MOSTRAR_PONTOS = st.sidebar.checkbox("Mostrar pontos clicáveis", True)
-SEMPRE_TODAS = st.sidebar.checkbox("Sempre mostrar todas", True)
+#SEMPRE_TODAS = st.sidebar.checkbox("Sempre mostrar todas", True)
 
 # -----------------------------
 # Coordenadas (cache)

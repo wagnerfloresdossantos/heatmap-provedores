@@ -1,90 +1,124 @@
-python3 -m venv venv
+# Heatmap de Provedores (Streamlit + Folium)
+
+App em **Streamlit** para análise geográfica de provedores/clientes, com
+mapas interativos, rankings e filtros avançados.
+
+Desenvolvido por: **Wagner Flores dos Santos**
+
+------------------------------------------------------------------------
+
+## ✅ Funcionalidades
+
+-   Upload de planilhas Excel (.xls, .xlsx, .xlsm)
+-   Visualização em mapa com Heatmap e pontos clicáveis
+-   Filtros por:
+    -   Nome fantasia
+    -   Vendedor
+    -   UF
+    -   Cidade atendida
+    -   Período de contrato
+-   Ranking por cidade, estado e região
+-   Suporte a múltiplas cidades atendidas por cliente
+-   Cache de coordenadas
+-   Autenticação opcional
+
+------------------------------------------------------------------------
+
+## 📄 Estrutura da Planilha
+
+### Coluna obrigatória
+
+CIDADES_ATENDIDAS
+
+Formato:
+
+Cuiabá/MT; Várzea Grande/MT\
+Cuiabá/MT\|5; Rondonópolis/MT\|2
+
+### Colunas recomendadas
+
+-   NOME FANTASIA
+-   ASSINATURA CONTRATO
+-   VENDEDOR
+-   UF
+-   CIDADE
+-   VALOR MENSAL
+
+------------------------------------------------------------------------
+
+## 🌍 Coordenadas
+
+Utilize o arquivo cidades.csv:
+
+cidade,uf,lat,lon\
+Cuiabá,MT,-15.601,-56.097
+
+Arquivo exemplo disponível: cidades.csv.example
+
+------------------------------------------------------------------------
+
+## ▶️ Execução Local
+
+### Criar ambiente virtual
+
+python3 -m venv venv\
 source venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
-
-
-
-# Heatmap de Provedores (local -> remoto)
-
-App em **Streamlit** que lê uma planilha `.xls/.xlsx` de clientes/provedores e desenha um **mapa de calor** em cima de um mapa estilo Google Maps (OpenStreetMap/Leaflet via Folium).
-
-✅ Suporta:  
-- 1 cliente atendendo **várias cidades** via coluna `CIDADES_ATENDIDAS`  
-- `Cidade/UF` e **peso opcional** `Cidade/UF|peso` (se não informar, peso=1)  
-- filtros por STATUS/VENDEDOR/UF do cliente **e** por UF/Cidade atendida  
-- Top 10 cidades atendidas (por quantidade e por soma de peso)  
-- autenticação por **login e senha** (pronto para usar local e manter no remoto)
-
----
-
-## 1) Estrutura esperada na planilha
-
-Crie/alimente a coluna:
-
-- `CIDADES_ATENDIDAS` com o formato:  
-  - `Cuiabá/MT; Várzea Grande/MT; Rondonópolis/MT`  
-  - ou com peso: `Cuiabá/MT|5; Várzea Grande/MT|3; Rondonópolis/MT|1`
-
-O app tenta usar as colunas `STATUS`, `VENDEDOR`, `UF`, `CIDADE` se existirem (para filtros). Se sua planilha tiver nomes diferentes, você consegue ajustar no arquivo `config.py`.
-
----
-
-## 2) Rodar local (sem Docker)
-
-### Requisitos
-- Python 3.10+
 
 ### Instalar dependências
-```bash
+
 pip install -r requirements.txt
-```
 
-### Criar usuário/senha (gera hash bcrypt)
-```bash
-python tools/create_user.py
-```
-Ele vai pedir usuário e senha e vai salvar em `users.json`.
+### Executar
 
-### Rodar
-```bash
 streamlit run app.py
-```
 
----
+------------------------------------------------------------------------
 
-## 3) Coordenadas das cidades (como funciona)
+## 🐳 Execução com Docker
 
-O app usa uma destas opções, nesta ordem:
+docker compose up -d --build
 
-1. `cidades.csv` (recomendado) com colunas: `cidade,uf,lat,lon`
-2. Se não existir `cidades.csv`, ele pode **geocodificar** automaticamente (precisa internet) usando Nominatim (OpenStreetMap), salva cache em `cidades_cache.csv` e reutiliza depois.
+Acesse: http://localhost:8501
 
-> Em produção/remoto, o ideal é manter `cidades.csv` (ou o cache pronto) para evitar dependência de geocoding.
+------------------------------------------------------------------------
 
----
+## ☁️ Streamlit Cloud
 
-## 4) Preparado para acesso remoto
+O sistema aceita upload direto via interface.
 
-Você pode subir em um VPS usando Docker (ver `Dockerfile` e `docker-compose.yml`) e colocar um proxy (Nginx/Caddy) na frente com HTTPS.
+Recomenda-se subir também o arquivo cidades.csv.
 
-Autenticação:
-- A autenticação por login/senha já está no app (`users.json` com hash).  
-- Para produção, você também pode somar autenticação no proxy (Basic Auth/SSO), se quiser “dupla camada”.
+------------------------------------------------------------------------
 
----
+## 🔐 Autenticação
 
-## 5) Arquivos principais
+Opcional via auth.py
 
-- `app.py` -> app Streamlit (UI + mapa)
-- `auth.py` -> login/sessão
-- `geo.py` -> explode cidades + lat/lon (csv ou geocode)
-- `config.py` -> mapeamento de colunas
-- `tools/create_user.py` -> cria/atualiza `users.json`
+Criar usuário:
 
----
+python tools/create_user.py
 
-## Dicas rápidas
-- Padronize sempre `Cidade/UF` e separe cidades com `;`
-- UF com 2 letras
-- Evite acentos inconsistentes (o app normaliza, mas padronizar ajuda)
+------------------------------------------------------------------------
+
+## 📁 Estrutura
+
+-   app.py → Interface principal
+-   geo.py → Geolocalização
+-   data_loader.py → Leitura dos dados
+-   auth.py → Autenticação
+-   config.py → Configurações
+-   assets/ → Imagens
+
+------------------------------------------------------------------------
+
+## 👨‍💻 Desenvolvedor
+
+Wagner Flores dos Santos\
+Engenharia de Telecomunicações / Consultor em Tecnologia
+
+------------------------------------------------------------------------
+
+## 📜 Licença
+
+Uso livre para fins educacionais e comerciais, mediante citação do
+autor.
