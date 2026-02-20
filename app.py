@@ -236,7 +236,7 @@ st.sidebar.subheader("Bolinhas (pontos clicáveis)")
 
 modo_bolinhas = st.sidebar.radio(
     "Mostrar bolinhas por:",
-    ["Cidades atendidas", "Cidade base do cliente", "Ambos"],
+    ["Cidades atendidas", "Cidade base do cliente"],
     index=0,
 )
 
