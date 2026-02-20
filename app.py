@@ -6,6 +6,7 @@ from pathlib import Path
 import streamlit.components.v1 as components
 import unicodedata
 
+
 from data_loader import read_spreadsheet
 from geo import (
     explode_cidades,
@@ -160,7 +161,7 @@ if col_exists(df, "ASSINATURA CONTRATO"):
 else:
     df["ASSINATURA_DT"] = pd.NaT
 
-st.caption(f"Planilha carregada: `{planilha_path}` | Linhas: {len(df)}")
+#st.caption(f"Planilha carregada: `{planilha_path}` | Linhas: {len(df)}")
 
 # -----------------------------
 # Filtros (cliente)
