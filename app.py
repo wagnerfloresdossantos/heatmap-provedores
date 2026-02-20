@@ -127,34 +127,29 @@ st.sidebar.title("Mapa de calor")
 
 st.title("Mapa de calor de clientes/provedores")
 
+
+from io import BytesIO
+
 # Upload (Cloud-friendly)
 up = st.file_uploader(
     "Envie a planilha (.xls/.xlsx) (no Streamlit Cloud isso é obrigatório)",
     type=["xls", "xlsx", "xlsm"],
 )
 
-# decide fonte da planilha
-planilha_path = None
-if up is not None:
-    is_xlsx = up.name.lower().endswith(("xlsx", "xlsm"))
-    tmp_path = Path("uploaded_planilha.xlsx" if is_xlsx else "uploaded_planilha.xls")
-    tmp_path.write_bytes(up.getbuffer())
-    planilha_path = str(tmp_path)
-else:
+if up is None:
     # tenta usar padrão local (funciona localmente, mas no Cloud geralmente não existe)
     if getattr(config, "DEFAULT_SPREADSHEET_PATH", None) and Path(config.DEFAULT_SPREADSHEET_PATH).exists():
-        planilha_path = config.DEFAULT_SPREADSHEET_PATH
+        df = read_spreadsheet(config.DEFAULT_SPREADSHEET_PATH)
+        st.caption(f"Planilha carregada: `{config.DEFAULT_SPREADSHEET_PATH}` | Linhas: {len(df)}")
+    else:
+        st.info("Envie uma planilha para começar (no Cloud não existe arquivo padrão local).")
+        st.stop()
+else:
+    # ✅ NÃO salva no disco: evita conflito entre usuários/sessões no Cloud
+    data = BytesIO(up.getvalue())
+    df = read_spreadsheet(data)
+    st.caption(f"Planilha carregada: `{up.name}` | Linhas: {len(df)}")
 
-if not planilha_path:
-    st.info("Envie uma planilha para começar (no Cloud não existe arquivo padrão local).")
-    st.stop()
-
-# Ler planilha
-try:
-    df = read_spreadsheet(planilha_path)
-except Exception as e:
-    st.error(f"Não consegui ler a planilha: {e}")
-    st.stop()
 
 # Normaliza nomes das colunas (resolve VALOR\nMENSAL etc.)
 df.columns = [_norm_col(c) for c in df.columns]
